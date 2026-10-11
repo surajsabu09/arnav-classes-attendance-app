@@ -1,6 +1,6 @@
 // Caches only the static app shell. Data calls to Supabase always go to the network.
-const CACHE = "attendance-shell-v3";
-const APP_SHELL = ["./", "./index.html", "./app.js?v=3", "./config.js", "./manifest.json"];
+const CACHE = "attendance-shell-v4";
+const APP_SHELL = ["./", "./index.html", "./app.js?v=4", "./config.js", "./manifest.json"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(APP_SHELL)));
