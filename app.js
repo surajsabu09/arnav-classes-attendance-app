@@ -18,6 +18,15 @@
   const fmtTime = (iso) => iso ? new Intl.DateTimeFormat("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: true }).format(new Date(iso)) : "-";
   const fmtDate = (ymd) => new Intl.DateTimeFormat("en-IN", { day: "2-digit", month: "short", year: "numeric", timeZone: "UTC" }).format(new Date(ymd + "T00:00:00Z"));
   const fmtShort = (ymd) => new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", timeZone: "UTC" }).format(new Date(ymd + "T00:00:00Z"));
+  const isSessionOverdue = (date, start, grace = 0) => {
+    const today = istDate();
+    if (date < today) return true;
+    if (date > today || !start) return false;
+    const parts = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(new Date());
+    const currentMinutes = Number(parts.find((part) => part.type === "hour").value) * 60 + Number(parts.find((part) => part.type === "minute").value);
+    const [startHour, startMinute] = start.slice(0, 5).split(":").map(Number);
+    return currentMinutes > startHour * 60 + startMinute + grace;
+  };
   const pill = (s) => `<span class="pill ${esc(s)}">${esc(String(s).replace("_", " "))}</span>`;
   const msg = (el, text, kind = "err") => { el.className = "msg " + kind; el.textContent = text; el.classList.remove("hidden"); };
   const cleanErr = (e) => (e && e.message ? e.message : String(e));
@@ -150,13 +159,12 @@
   }
 
   // ---------- teacher ----------
-  const TEACHER_TABS = [["today", "Today"], ["history", "History"], ["leave", "Leave"], ["account", "Account"]];
+  const TEACHER_TABS = [["today", "Today"], ["schedule", "Schedule"], ["history", "History"], ["leave", "Leave"], ["account", "Account"]];
   let teacherTab = "today";
 
   async function renderTeacher() {
-    app.innerHTML = `<section class="page-heading"><div><p class="eyebrow">TEACHER WORKSPACE</p><h2>Welcome back, ${esc(me.full_name)}</h2><p class="mute">Your attendance and requests</p></div>${sitePicker()}</section>
+    app.innerHTML = `<section class="page-heading"><div><p class="eyebrow">TEACHER WORKSPACE</p><h2>Welcome back, ${esc(me.full_name)}</h2><p class="mute">Your lectures and attendance</p></div></section>
       <nav class="tabs" id="teacherTabs" aria-label="Teacher sections"></nav><div id="teacherPanel"></div>`;
-    bindSitePicker(() => showTeacherTab(teacherTab));
     drawTeacherTabs();
     await showTeacherTab(teacherTab);
   }
@@ -187,11 +195,8 @@
 
   async function showTeacherTab(key) {
     const panel = $("#teacherPanel");
-    if (!sites.length) {
-      panel.innerHTML = `<div class="card"><div class="msg err">Your account is not assigned to an active institute branch. Contact the admin.</div></div>`;
-      return;
-    }
     if (key === "today") return loadTeacherToday();
+    if (key === "schedule") return loadTeacherSchedule();
     if (key === "history") return loadTeacherHistory();
     if (key === "leave") return loadTeacherLeaves();
     panel.innerHTML = pwCard();
@@ -201,32 +206,45 @@
   async function loadTeacherToday() {
     const today = istDate();
     const panel = $("#teacherPanel");
-    const { data: t, error } = await sb.from("attendance").select("*").eq("teacher_id", me.id)
-      .eq("work_date", today).maybeSingle();
-    if (error) return (panel.innerHTML = `<div class="card"><div class="msg err">${esc(cleanErr(error))}</div></div>`);
-    const site = sites.find((s) => s.id === (t?.site_id || selectedSiteId)) || { name: "Your assigned branch", shift_start: "", shift_end: "" };
-    const shift = site.shift_start ? `Shift ${esc(site.shift_start.slice(0,5))} to ${esc(site.shift_end.slice(0,5))}` : "";
-    let html = `<div class="card attendance-card"><div class="attendance-top"><div><p class="eyebrow">${fmtDate(today)}</p><h3>${esc(site.name)}</h3><p class="mute">${shift}</p></div>${t ? pill(t.is_late ? "late" : "present") : `<span class="pill">Not checked in</span>`}</div>`;
-    if (t) html += `<div class="time-grid"><div><span class="mute">Check in</span><strong>${fmtTime(t.check_in)}</strong></div><div><span class="mute">Check out</span><strong>${fmtTime(t.check_out)}</strong></div></div>`;
-    else html += `<p class="mute">Your attendance has not been recorded for this branch today.</p>`;
-    if (!t) html += `<button class="big ok" id="btnIn">Check in</button>`;
-    else if (!t.check_out) html += `<button class="big danger" id="btnOut">Check out</button>`;
-    else html += `<div class="msg good">Your day is complete.</div>`;
-    html += `<div id="am" class="msg hidden"></div></div>`;
-    panel.innerHTML = html;
-    if ($("#btnIn")) $("#btnIn").onclick = () => mark("in");
-    if ($("#btnOut")) $("#btnOut").onclick = () => mark("out", t.site_id);
+    panel.innerHTML = `<div class="section-heading"><div><p class="eyebrow">${fmtDate(today)}</p><h3>Today's lectures</h3></div></div><div id="todaySessions" class="session-list">Loading...</div>`;
+    await renderTeacherSessions(today, today, "#todaySessions");
+  }
+
+  async function loadTeacherSchedule() {
+    const from = istDate();
+    const until = new Date(new Date(`${from}T00:00:00Z`).getTime() + 30 * 864e5).toISOString().slice(0, 10);
+    $("#teacherPanel").innerHTML = `<div class="section-heading"><div><p class="eyebrow">UPCOMING</p><h3>Lecture schedule</h3></div><span class="mute">Next 30 days</span></div><div id="scheduleSessions" class="session-list">Loading...</div>`;
+    await renderTeacherSessions(from, until, "#scheduleSessions");
+  }
+
+  async function renderTeacherSessions(from, until, target) {
+    const host = $(target);
+    const { data, error } = await sb.from("lecture_sessions")
+      .select("id, title, session_date, start_time, end_time, site_id, institute_sites(name), attendance(id, check_in, check_out, is_late)")
+      .eq("teacher_id", me.id).eq("active", true).gte("session_date", from).lte("session_date", until)
+      .order("session_date").order("start_time");
+    if (error) return (host.innerHTML = `<div class="msg err">${esc(cleanErr(error))}</div>`);
+    if (!data?.length) return (host.innerHTML = `<div class="card"><p class="mute">No lectures assigned for these dates.</p></div>`);
+    host.innerHTML = data.map((session) => {
+      const record = session.attendance?.[0];
+      const timing = session.start_time ? `${esc(session.start_time.slice(0, 5))} - ${esc(session.end_time.slice(0, 5))}` : "Time not fixed";
+      const status = record?.check_out ? "complete" : record?.check_in ? "in progress" : "not checked in";
+      return `<article class="session-card"><div class="session-info"><p class="eyebrow">${fmtDate(session.session_date)}</p><h4>${esc(session.title)}</h4><p class="mute">${esc(session.institute_sites?.name || "Branch unavailable")} · ${timing}</p>${record ? `<p class="session-times">In ${fmtTime(record.check_in)} <span>Out ${fmtTime(record.check_out)}</span></p>` : ""}</div><div class="session-action">${pill(record?.is_late ? "late" : status)}${!record ? `<button class="ok" data-attend="in" data-session="${esc(session.id)}">Check in</button>` : !record.check_out ? `<button class="danger" data-attend="out" data-session="${esc(session.id)}">Check out</button>` : ""}<div id="am-${esc(session.id)}" class="msg hidden"></div></div></article>`;
+    }).join("");
+    host.querySelectorAll("button[data-attend]").forEach((button) => {
+      button.onclick = () => mark(button.dataset.attend, button.dataset.session);
+    });
   }
 
   async function loadTeacherHistory() {
     const since = istDate(new Date(Date.now() - 30 * 864e5));
     const panel = $("#teacherPanel");
     panel.innerHTML = `<div class="card"><div class="section-heading"><div><p class="eyebrow">ATTENDANCE</p><h3>Recent history</h3></div><span class="mute">Last 30 days</span></div><div id="historyRows" class="scroll">Loading...</div></div>`;
-    const { data, error } = await sb.from("attendance").select("*, institute_sites(name)").eq("teacher_id", me.id)
+    const { data, error } = await sb.from("attendance").select("*, lecture_sessions(title, session_date, institute_sites(name))").eq("teacher_id", me.id)
       .gte("work_date", since).order("work_date", { ascending: false });
     if (error) return ($("#historyRows").innerHTML = `<div class="msg err">${esc(cleanErr(error))}</div>`);
     $("#historyRows").innerHTML = (data || []).length
-      ? `<table><tr><th>Date</th><th>Branch</th><th>In</th><th>Out</th><th>Status</th></tr>${data.map((r) => `<tr><td>${fmtDate(r.work_date)}</td><td>${esc(r.institute_sites?.name || "")}</td><td>${fmtTime(r.check_in)}</td><td>${fmtTime(r.check_out)}</td><td>${r.is_late ? pill("late") : pill("present")}</td></tr>`).join("")}</table>`
+      ? `<table><tr><th>Date</th><th>Lecture</th><th>Branch</th><th>In</th><th>Out</th><th>Status</th></tr>${data.map((r) => `<tr><td>${fmtDate(r.work_date)}</td><td>${esc(r.lecture_sessions?.title || "Legacy attendance")}</td><td>${esc(r.lecture_sessions?.institute_sites?.name || "")}</td><td>${fmtTime(r.check_in)}</td><td>${fmtTime(r.check_out)}</td><td>${r.is_late ? pill("late") : pill("present")}</td></tr>`).join("")}</table>`
       : `<p class="mute">No attendance records in the last 30 days.</p>`;
   }
 
@@ -245,16 +263,18 @@
       : `<p class="mute">No leave requests yet.</p>`;
   }
 
-  async function mark(action, siteId = selectedSiteId) {
-    const btn = $(action === "in" ? "#btnIn" : "#btnOut"); const am = $("#am");
+  async function mark(action, sessionId) {
+    const btn = document.querySelector(`button[data-attend="${action}"][data-session="${sessionId}"]`);
+    const am = $(`#am-${sessionId}`);
+    if (!btn || !am) return;
     btn.disabled = true; btn.textContent = "Getting location...";
     try {
       const pos = await getPosition();
       const { error } = await sb.rpc("mark_attendance", {
-        p_action: action, p_site_id: siteId, p_lat: pos.coords.latitude, p_lng: pos.coords.longitude, p_accuracy: pos.coords.accuracy
+        p_action: action, p_session_id: sessionId, p_lat: pos.coords.latitude, p_lng: pos.coords.longitude, p_accuracy: pos.coords.accuracy
       });
       if (error) throw error;
-      await loadTeacherToday();
+      await showTeacherTab(teacherTab);
     } catch (e) {
       btn.disabled = false; btn.textContent = action === "in" ? "Check in" : "Check out";
       msg(am, cleanErr(e));
@@ -270,7 +290,7 @@
   }
 
   // ---------- admin ----------
-  const TABS = [["today", "Today"], ["leaves", "Leaves"], ["report", "Report"], ["settings", "Branches"], ["account", "Account"]];
+  const TABS = [["today", "Today"], ["schedule", "Schedule"], ["leaves", "Leaves"], ["report", "Report"], ["settings", "Branches"], ["account", "Account"]];
   let tab = "today";
 
   function renderAdmin() {
@@ -288,22 +308,109 @@
     const { count } = await sb.from("leaves").select("id", { count: "exact", head: true }).eq("status", "pending");
     drawTabs({ leaves: count || 0 });
   }
-  function showTab(k) { ({ today: tabToday, leaves: tabLeaves, report: tabReport, settings: tabSettings, account: tabAccount })[k](); }
+  function showTab(k) { ({ today: tabToday, schedule: tabSchedule, leaves: tabLeaves, report: tabReport, settings: tabSettings, account: tabAccount })[k](); }
   function tabAccount() { $("#panel").innerHTML = pwCard(); bindPw(); }
 
   async function tabToday() {
     const p = $("#panel");
-    p.innerHTML = `<div class="card"><h2>Today</h2><div class="row"><input type="date" id="d" value="${istDate()}" style="flex:0 0 170px"><button class="secondary" id="r" style="flex:0 0 auto">Refresh</button></div><div id="out" class="scroll" style="margin-top:12px">Loading...</div></div>`;
+    p.innerHTML = `<div class="card"><div class="section-heading"><div><p class="eyebrow">LECTURE ATTENDANCE</p><h3>Daily overview</h3></div><button class="secondary" id="r" type="button">Refresh</button></div><label>Date<input type="date" id="d" value="${istDate()}"></label><div id="out" class="scroll" style="margin-top:12px">Loading...</div></div>`;
     const load = async () => {
       const day = $("#d").value;
-      const { data, error } = await sb.rpc("admin_day_status", { p_date: day, p_site_id: selectedSiteId });
+      let query = sb.from("lecture_sessions").select("id, title, session_date, start_time, end_time, late_grace_min, teacher_id, site_id, profiles!lecture_sessions_teacher_id_fkey(full_name), institute_sites(name), attendance(id, check_in, check_out, is_late)")
+        .eq("session_date", day).eq("active", true).order("start_time");
+      if (selectedSiteId) query = query.eq("site_id", selectedSiteId);
+      const { data, error } = await query;
       if (error) return ($("#out").innerHTML = `<div class="msg err">${esc(cleanErr(error))}</div>`);
-      const flagged = data.filter((r) => r.status === "late" || r.status === "absent");
-      $("#out").innerHTML =
-        (flagged.length ? `<div class="msg err"><b>Needs attention:</b> ${flagged.map((r) => `${esc(r.full_name)} (${esc(r.status)})`).join(", ")}</div>` : "") +
-        `<table><tr><th>Teacher</th><th>Status</th><th>In</th><th>Out</th></tr>${data.map((r) => `<tr><td>${esc(r.full_name)}</td><td>${pill(r.status)}</td><td>${fmtTime(r.check_in)}</td><td>${fmtTime(r.check_out)}</td></tr>`).join("")}</table>`;
+      $("#out").innerHTML = data?.length
+        ? `<table><tr><th>Lecture</th><th>Teacher</th><th>Branch</th><th>Time</th><th>Status</th><th>In</th><th>Out</th></tr>${data.map((session) => {
+          const record = session.attendance?.[0];
+          let status = record?.check_out ? "complete" : record?.is_late ? "late" : record?.check_in ? "present" : "scheduled";
+          if (!record && isSessionOverdue(day, session.start_time, session.late_grace_min)) status = "absent";
+          const time = session.start_time ? `${session.start_time.slice(0, 5)} - ${session.end_time.slice(0, 5)}` : "Flexible";
+          return `<tr><td>${esc(session.title)}</td><td>${esc(session.profiles?.full_name || "")}</td><td>${esc(session.institute_sites?.name || "")}</td><td>${time}</td><td>${pill(status)}</td><td>${fmtTime(record?.check_in)}</td><td>${fmtTime(record?.check_out)}</td></tr>`;
+        }).join("")}</table>`
+        : `<p class="mute">No lectures scheduled for this date and branch.</p>`;
     };
     $("#d").onchange = load; $("#r").onclick = load; load();
+  }
+
+  async function tabSchedule() {
+    const siteOptions = sites.map((site) => `<option value="${esc(site.id)}" ${site.id === selectedSiteId ? "selected" : ""}>${esc(site.name)}</option>`).join("");
+    $("#panel").innerHTML = `<div class="two-column schedule-layout"><div class="card"><p class="eyebrow">LECTURE PLANNING</p><h3 id="sessionFormTitle">Assign a lecture</h3>
+      <form id="sessionForm"><input type="hidden" id="sessionId">
+        <label>Lecture or batch name<input id="sessionName" maxlength="120" required placeholder="e.g. Grade 8 mathematics"></label>
+        <div class="row"><div><label>Branch<select id="sessionSite" required>${siteOptions}</select></label></div><div><label>Teacher<select id="sessionTeacher" required></select></label></div></div>
+        <div class="row"><div><label>Lecture date<input id="sessionDate" type="date" value="${istDate()}" required></label></div><div><label>Start time (optional)<input id="sessionStart" type="time"></label></div><div><label>End time (optional)<input id="sessionEnd" type="time"></label></div></div>
+        <label>Late grace (minutes)<input id="sessionGrace" type="number" min="0" value="10" required></label>
+        <div id="sessionMessage" class="msg hidden"></div><div class="row"><button id="sessionSave">Save lecture</button><button id="sessionCancel" class="secondary hidden" type="button">Cancel edit</button></div>
+      </form></div><div class="card"><p class="eyebrow">SCHEDULE</p><h3>Lectures on selected date</h3><label>Date<input id="sessionListDate" type="date" value="${istDate()}"></label><div id="sessionList" class="session-list">Loading...</div></div></div>`;
+    const site = $("#sessionSite");
+    const teacher = $("#sessionTeacher");
+    const fillTeachers = async (selectedTeacher = "") => {
+      const { data, error } = await sb.from("site_assignments").select("teacher_id, profiles!site_assignments_teacher_id_fkey(full_name)").eq("site_id", site.value);
+      if (error) {
+        teacher.innerHTML = `<option value="">Could not load teachers</option>`;
+        return msg($("#sessionMessage"), cleanErr(error));
+      }
+      teacher.innerHTML = data?.length
+        ? data.map((row) => `<option value="${esc(row.teacher_id)}" ${row.teacher_id === selectedTeacher ? "selected" : ""}>${esc(row.profiles?.full_name || "Teacher")}</option>`).join("")
+        : `<option value="">No teachers assigned to this branch</option>`;
+    };
+    const clearForm = () => {
+      $("#sessionForm").reset(); $("#sessionId").value = ""; $("#sessionDate").value = istDate();
+      $("#sessionSite").value = selectedSiteId || sites[0]?.id || "";
+      $("#sessionGrace").value = "10"; $("#sessionFormTitle").textContent = "Assign a lecture";
+      $("#sessionSave").textContent = "Save lecture"; $("#sessionCancel").classList.add("hidden");
+      fillTeachers();
+    };
+    const loadSessions = async () => {
+      const { data, error } = await sb.from("lecture_sessions").select("id, title, session_date, start_time, end_time, late_grace_min, teacher_id, site_id, active, profiles!lecture_sessions_teacher_id_fkey(full_name), institute_sites(name), attendance(id)")
+        .eq("session_date", $("#sessionListDate").value).order("start_time");
+      if (error) return ($("#sessionList").innerHTML = `<div class="msg err">${esc(cleanErr(error))}</div>`);
+      $("#sessionList").innerHTML = data?.length ? data.map((session) => {
+        const recorded = session.attendance?.length > 0;
+        const timing = session.start_time ? `${session.start_time.slice(0, 5)} - ${session.end_time.slice(0, 5)}` : "Flexible time";
+        return `<article class="session-card"><div class="session-info"><h4>${esc(session.title)}</h4><p class="mute">${esc(session.profiles?.full_name || "")} · ${esc(session.institute_sites?.name || "")} · ${timing}</p>${session.active ? "" : pill("cancelled")}</div><div class="session-action"><button class="secondary" data-edit-session="${esc(session.id)}" ${recorded ? "disabled title=\"Attendance already recorded\"" : ""}>Edit</button><button class="danger" data-delete-session="${esc(session.id)}" ${recorded ? "disabled title=\"Attendance already recorded\"" : ""}>Remove</button></div></article>`;
+      }).join("") : `<p class="mute">No lectures on this date.</p>`;
+      $("#sessionList").querySelectorAll("button[data-edit-session]").forEach((button) => {
+        button.onclick = async () => {
+          const session = data.find((item) => item.id === button.dataset.editSession);
+          $("#sessionId").value = session.id; $("#sessionName").value = session.title;
+          $("#sessionDate").value = session.session_date; $("#sessionStart").value = session.start_time?.slice(0, 5) || "";
+          $("#sessionEnd").value = session.end_time?.slice(0, 5) || ""; $("#sessionGrace").value = session.late_grace_min;
+          site.value = session.site_id; await fillTeachers(session.teacher_id);
+          $("#sessionFormTitle").textContent = "Edit lecture"; $("#sessionSave").textContent = "Update lecture";
+          $("#sessionCancel").classList.remove("hidden"); $("#sessionName").focus();
+        };
+      });
+      $("#sessionList").querySelectorAll("button[data-delete-session]").forEach((button) => {
+        button.onclick = async () => {
+          if (!confirm("Remove this scheduled lecture?")) return;
+          const { error: deleteError } = await sb.from("lecture_sessions").delete().eq("id", button.dataset.deleteSession);
+          if (deleteError) return msg($("#sessionMessage"), cleanErr(deleteError));
+          loadSessions();
+        };
+      });
+    };
+    site.onchange = () => fillTeachers();
+    $("#sessionDate").onchange = () => { $("#sessionListDate").value = $("#sessionDate").value; loadSessions(); };
+    $("#sessionListDate").onchange = loadSessions;
+    $("#sessionCancel").onclick = clearForm;
+    $("#sessionForm").onsubmit = async (event) => {
+      event.preventDefault();
+      const start = $("#sessionStart").value || null, end = $("#sessionEnd").value || null;
+      if (!!start !== !!end) return msg($("#sessionMessage"), "Enter both start and end times, or leave both blank.");
+      const payload = { title: $("#sessionName").value.trim(), teacher_id: teacher.value, site_id: site.value,
+        session_date: $("#sessionDate").value, start_time: start, end_time: end, late_grace_min: Number($("#sessionGrace").value) };
+      const id = $("#sessionId").value;
+      const result = id
+        ? await sb.from("lecture_sessions").update(payload).eq("id", id)
+        : await sb.from("lecture_sessions").insert(payload);
+      if (result.error) return msg($("#sessionMessage"), cleanErr(result.error));
+      $("#sessionListDate").value = payload.session_date; clearForm(); loadSessions();
+    };
+    await fillTeachers();
+    await loadSessions();
   }
 
   async function tabLeaves() {
@@ -329,20 +436,41 @@
 
   async function tabReport() {
     const p = $("#panel"); const now = istDate().slice(0, 7);
-    p.innerHTML = `<div class="card"><h2>Monthly report</h2><div class="row"><input type="month" id="mo" value="${now}" style="flex:0 0 190px"><button id="csv" class="secondary" style="flex:0 0 auto" disabled>Download CSV</button></div><div id="out" class="scroll" style="margin-top:12px">Loading...</div><p class="mute">Absent = working day with no check-in and no approved leave. Counted up to today.</p></div>`;
+    p.innerHTML = `<div class="card"><div class="section-heading"><div><p class="eyebrow">CONSOLIDATED ATTENDANCE</p><h3>Monthly report</h3></div><button id="csv" class="secondary" disabled>Download CSV</button></div><div class="row"><div><label>Month<input type="month" id="mo" value="${now}"></label></div><div><label>Branch<select id="reportSite"><option value="">All branches</option>${sites.map((site) => `<option value="${esc(site.id)}">${esc(site.name)}</option>`).join("")}</select></label></div></div><div id="out" class="scroll" style="margin-top:12px">Loading...</div></div>`;
     let rows = [];
     const load = async () => {
-      const [y, m] = $("#mo").value.split("-").map(Number);
-      const { data, error } = await sb.rpc("admin_monthly_report", { p_year: y, p_month: m, p_site_id: selectedSiteId });
+      const [year, month] = $("#mo").value.split("-").map(Number);
+      const first = `${year}-${String(month).padStart(2, "0")}-01`;
+      const nextMonth = new Date(Date.UTC(year, month, 1)).toISOString().slice(0, 10);
+      let query = sb.from("lecture_sessions").select("teacher_id, profiles!lecture_sessions_teacher_id_fkey(full_name), session_date, start_time, late_grace_min, attendance(check_in, check_out, is_late)")
+        .gte("session_date", first).lt("session_date", nextMonth).lte("session_date", istDate()).eq("active", true);
+      if ($("#reportSite").value) query = query.eq("site_id", $("#reportSite").value);
+      const { data, error } = await query;
       if (error) return ($("#out").innerHTML = `<div class="msg err">${esc(cleanErr(error))}</div>`);
-      rows = data; $("#csv").disabled = !rows.length;
-      $("#out").innerHTML = `<table><tr><th>Teacher</th><th title="Working days so far">Days</th><th>Pres.</th><th>Late</th><th>Leave</th><th>Abs.</th><th>Hrs</th></tr>${rows.map((r) => `<tr><td>${esc(r.full_name)}</td><td>${r.working_days}</td><td>${r.present}</td><td>${r.late}</td><td>${r.leave_days}</td><td>${r.absent}</td><td>${r.hours_worked}</td></tr>`).join("")}</table>`;
+      const totals = new Map();
+      for (const session of data || []) {
+        const teacherId = session.teacher_id;
+        const row = totals.get(teacherId) || { name: session.profiles?.full_name || "", lectures: 0, attended: 0, late: 0, missed: 0, hours: 0 };
+        row.lectures++;
+        const record = session.attendance?.[0];
+        if (record?.check_in) {
+          row.attended++;
+          if (record.is_late) row.late++;
+          if (record.check_out) row.hours += Math.max(0, new Date(record.check_out) - new Date(record.check_in)) / 3600000;
+        } else if (isSessionOverdue(session.session_date, session.start_time, session.late_grace_min)) row.missed++;
+        totals.set(teacherId, row);
+      }
+      rows = [...totals.values()].sort((a, b) => a.name.localeCompare(b.name)).map((row) => ({ ...row, hours: Math.round(row.hours * 10) / 10 }));
+      $("#csv").disabled = !rows.length;
+      $("#out").innerHTML = rows.length
+        ? `<table><tr><th>Teacher</th><th>Lectures</th><th>Attended</th><th>Late</th><th>Missed</th><th>Hours</th></tr>${rows.map((row) => `<tr><td>${esc(row.name)}</td><td>${row.lectures}</td><td>${row.attended}</td><td>${row.late}</td><td>${row.missed}</td><td>${row.hours}</td></tr>`).join("")}</table>`
+        : `<p class="mute">No lectures scheduled this month.</p>`;
     };
-    $("#mo").onchange = load;
+    $("#mo").onchange = load; $("#reportSite").onchange = load;
     $("#csv").onclick = () => {
-      const head = ["Teacher", "Working days", "Present", "Late", "Leave", "Absent", "Hours worked"];
+      const head = ["Teacher", "Lectures", "Attended", "Late", "Missed", "Hours"];
       const q = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-      const csv = [head, ...rows.map((r) => [r.full_name, r.working_days, r.present, r.late, r.leave_days, r.absent, r.hours_worked])].map((r) => r.map(q).join(",")).join("\n");
+      const csv = [head, ...rows.map((row) => [row.name, row.lectures, row.attended, row.late, row.missed, row.hours])].map((r) => r.map(q).join(",")).join("\n");
       const a = document.createElement("a");
       a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" })); a.download = `attendance-${$("#mo").value}.csv`; a.click();
     };
@@ -427,6 +555,6 @@
   }
 
   // ---------- start ----------
-  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js?v=3").catch(() => {});
   boot();
 })();
