@@ -555,6 +555,6 @@
   }
 
   // ---------- start ----------
-  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js?v=5").catch(() => {});
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js?v=6").catch(() => {});
   boot();
 })();
