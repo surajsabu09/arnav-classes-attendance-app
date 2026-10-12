@@ -1,6 +1,6 @@
 export function createAdminViews({
   sb, app, $, esc, fmtDate, fmtShort, fmtTime, istDate, isSessionOverdue, pill, msg, cleanErr, getPosition,
-  getMe, getSites, getSelectedSiteId, setSelectedSiteId, setSites, sitePicker, bindSitePicker, pwCard, bindPw
+  getMe, getEmail, accountView, getSites, getSelectedSiteId, setSelectedSiteId, setSites, sitePicker, bindSitePicker, bindPw
 }) {
   const tabs = [["today", "Today"], ["schedule", "Schedule"], ["leaves", "Leaves"], ["report", "Report"], ["settings", "Branches"], ["account", "Account"]];
   let activeTab = "today";
@@ -29,7 +29,10 @@ export function createAdminViews({
     ({ today: tabToday, schedule: tabSchedule, leaves: tabLeaves, report: tabReport, settings: tabSettings, account: tabAccount })[key]();
   }
 
-  function tabAccount() { $("#panel").innerHTML = pwCard(); bindPw(); }
+  function tabAccount() {
+    $("#panel").innerHTML = accountView({ fullName: getMe().full_name, email: getEmail(), role: getMe().role, branches: [] });
+    bindPw();
+  }
 
   async function tabToday() {
     $("#panel").innerHTML = `<div class="card"><div class="section-heading"><div><p class="eyebrow">LECTURE ATTENDANCE</p><h3>Daily overview</h3></div><button class="secondary" id="r" type="button">Refresh</button></div><label>Date<input type="date" id="d" value="${istDate()}"></label><div id="out" class="scroll" style="margin-top:12px">Loading...</div></div>`;
@@ -89,8 +92,8 @@ export function createAdminViews({
     const teacher = $("#sessionTeacher");
     const applySiteDefaults = () => {
       const branch = getSites().find((item) => item.id === site.value);
-      $("#sessionStart").value = branch?.shift_start?.slice(0, 5) || "";
-      $("#sessionEnd").value = branch?.shift_end?.slice(0, 5) || "";
+      $("#sessionStart").value = "";
+      $("#sessionEnd").value = "";
       $("#sessionGrace").value = branch?.late_grace_min ?? 10;
     };
     const fillTeachers = async (selectedTeacher = "") => {
@@ -163,11 +166,12 @@ export function createAdminViews({
 
   async function tabLeaves() {
     $("#panel").innerHTML = `<div class="card"><h2>Leave requests</h2><div id="out" class="scroll">Loading...</div></div>`;
-    const { data, error } = await sb.from("leaves").select("id, from_date, to_date, reason, status, profiles!leaves_teacher_id_fkey(full_name)").order("created_at", { ascending: false }).limit(50);
+    const { data, error } = await sb.from("leaves").select("id, from_date, to_date, leave_type, reason, status, profiles!leaves_teacher_id_fkey(full_name)").order("created_at", { ascending: false }).limit(50);
     if (error) return ($("#out").innerHTML = `<div class="msg err">${esc(cleanErr(error))}</div>`);
     $("#out").innerHTML = data.length ? data.map((leave) => `
       <div class="lv">
         <div class="lvhead"><b>${esc(leave.profiles?.full_name)}</b><span class="nw mute">${fmtShort(leave.from_date)}${leave.to_date !== leave.from_date ? " - " + fmtShort(leave.to_date) : ""}</span></div>
+        <label>Leave type<select data-leave-type="${esc(leave.id)}" ${leave.status === "pending" ? "" : "disabled"}>${[["casual", "Casual"], ["sick", "Sick"], ["personal", "Personal"], ["unpaid", "Unpaid"], ["other", "Other"]].map(([value, label]) => `<option value="${value}" ${leave.leave_type === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
         <div class="mute">${esc(leave.reason)}</div>
         <div class="lvact">${leave.status === "pending"
           ? `<button class="ok" data-id="${esc(leave.id)}" data-s="approved">Approve</button><button class="danger" data-id="${esc(leave.id)}" data-s="rejected">Reject</button>`
@@ -175,7 +179,8 @@ export function createAdminViews({
       </div>`).join("") : `<p class="mute">No requests.</p>`;
     $("#out").querySelectorAll("button[data-id]").forEach((button) => (button.onclick = async () => {
       button.disabled = true;
-      const { error: updateError } = await sb.from("leaves").update({ status: button.dataset.s, decided_by: getMe().id }).eq("id", button.dataset.id);
+      const leaveType = $(`[data-leave-type="${button.dataset.id}"]`).value;
+      const { error: updateError } = await sb.from("leaves").update({ status: button.dataset.s, leave_type: leaveType, decided_by: getMe().id }).eq("id", button.dataset.id);
       if (updateError) alert(cleanErr(updateError));
       tabLeaves(); updateBadges();
     }));
@@ -211,75 +216,90 @@ export function createAdminViews({
       sb.from("institute_sites").select("*").order("name"),
       sb.from("profiles").select("id, full_name, active").eq("role", "teacher").order("full_name")
     ]);
-    if (sitesError || teachersError) return ($("#panel").innerHTML = `<div class="card"><div class="msg err">${esc(cleanErr(sitesError || teachersError))}</div></div>`);
-    const branchSites = allSites || [];
-    const branchTeachers = teachers || [];
-    const activeEditorSite = forceNew ? null : branchSites.find((site) => site.id === getSelectedSiteId()) || branchSites[0] || null;
-    const site = activeEditorSite || { name: "", institute_lat: "", institute_lng: "", radius_m: 150, max_accuracy_m: 100, shift_start: "09:00", shift_end: "18:00", late_grace_min: 10, working_days: [1, 2, 3, 4, 5, 6], active: true };
-    $("#panel").innerHTML = `<div class="card"><div class="section-heading"><div><p class="eyebrow">LOCATIONS</p><h3>Branch settings</h3></div><button type="button" class="secondary" id="newBranch">Add branch</button></div>
-      <label>Editing branch<select id="branchEdit"><option value="">New branch</option>${branchSites.map((branch) => `<option value="${esc(branch.id)}" ${branch.id === site.id ? "selected" : ""}>${esc(branch.name)}${branch.active ? "" : " (inactive)"}</option>`).join("")}</select></label>
-      <form id="sf"><div class="row"><div><label>Branch name</label><input name="name" maxlength="100" value="${esc(site.name)}" required></div><div class="active-field"><label><input type="checkbox" name="active" ${site.active ? "checked" : ""}> Branch active</label></div></div>
-        <div class="row"><div><label>Latitude</label><input name="lat" type="number" min="-90" max="90" step="any" value="${esc(site.institute_lat)}" required></div><div><label>Longitude</label><input name="lng" type="number" min="-180" max="180" step="any" value="${esc(site.institute_lng)}" required></div></div>
-        <button type="button" class="secondary" id="here" style="margin-top:8px">Use my current location</button>
-        <div class="row"><div><label>Allowed radius (m)</label><input name="radius" type="number" min="30" value="${site.radius_m}" required></div><div><label>Max GPS error (m)</label><input name="acc" type="number" min="20" value="${site.max_accuracy_m}" required></div></div>
-        <div class="row"><div><label>Shift start</label><input name="start" type="time" value="${esc(site.shift_start.slice(0,5))}" required></div><div><label>Shift end</label><input name="end" type="time" value="${esc(site.shift_end.slice(0,5))}" required></div><div><label>Late grace (min)</label><input name="grace" type="number" min="0" value="${site.late_grace_min}" required></div></div>
-        <label>Working days</label><div class="weekday-list">${["Mon","Tue","Wed","Thu","Fri","Sat","Sun"].map((day, index) => `<label><input type="checkbox" name="wd" value="${index + 1}" ${site.working_days.includes(index + 1) ? "checked" : ""}>${day}</label>`).join("")}</div>
-        <div class="assignment-heading"><h4>Teachers assigned to this branch</h4><span class="mute">${branchTeachers.length} accounts</span></div>
-        <div id="teacherAssignments" class="teacher-list">Loading assignments...</div>
-        <div id="sm" class="msg hidden"></div><button style="margin-top:14px">Save branch</button></form></div>
-      <div class="card"><p class="eyebrow">TEAM</p><h3>Teacher accounts</h3><p class="mute">Create teacher accounts in Supabase Authentication. Add each teacher's full name in user metadata, then assign them to one or more branches above.</p></div>`;
-    const renderAssignments = async (siteId) => {
-      if (!siteId) {
+      if (sitesError || teachersError) return ($("#panel").innerHTML = `<div class="card"><div class="msg err">${esc(cleanErr(sitesError || teachersError))}</div></div>`);
+      const branchSites = allSites || [];
+      const branchTeachers = teachers || [];
+      const selectedBranch = forceNew ? null : branchSites.find((branch) => branch.id === getSelectedSiteId()) || branchSites[0] || null;
+      const site = selectedBranch || { name: "", institute_lat: "", institute_lng: "", radius_m: 150, max_accuracy_m: 100, late_grace_min: 10, working_days: [1, 2, 3, 4, 5, 6], active: true };
+      $("#panel").innerHTML = `<div class="branch-nav" aria-label="Branches">
+        ${branchSites.map((branch) => `<button type="button" class="${branch.id === site.id ? "active" : "secondary"}" data-branch="${esc(branch.id)}">${esc(branch.name)}${branch.active ? "" : " (inactive)"}</button>`).join("")}
+        <button type="button" class="secondary" id="newBranch">Add branch</button>
+      </div>
+      <div class="two-column branch-layout">
+        <div class="card"><p class="eyebrow">LOCATION</p><h3>${site.id ? "Branch details" : "New branch"}</h3>
+          <form id="sf"><div class="row"><div><label>Branch name</label><input name="name" maxlength="100" value="${esc(site.name)}" required></div><div class="active-field"><label><input type="checkbox" name="active" ${site.active ? "checked" : ""}> Branch active</label></div></div>
+            <div class="row"><div><label>Latitude</label><input name="lat" type="number" min="-90" max="90" step="any" value="${esc(site.institute_lat)}" required></div><div><label>Longitude</label><input name="lng" type="number" min="-180" max="180" step="any" value="${esc(site.institute_lng)}" required></div></div>
+            <button type="button" class="secondary" id="here" style="margin-top:8px">Use my current location</button>
+            <div class="row"><div><label>Allowed radius (m)</label><input name="radius" type="number" min="30" value="${site.radius_m}" required></div><div><label>Max GPS error (m)</label><input name="acc" type="number" min="20" value="${site.max_accuracy_m}" required></div><div><label>Late grace (min)</label><input name="grace" type="number" min="0" value="${site.late_grace_min}" required></div></div>
+            <label>Working days</label><div class="weekday-list">${["Mon","Tue","Wed","Thu","Fri","Sat","Sun"].map((day, index) => `<label><input type="checkbox" name="wd" value="${index + 1}" ${site.working_days.includes(index + 1) ? "checked" : ""}>${day}</label>`).join("")}</div>
+            <div id="sm" class="msg hidden"></div><button style="margin-top:14px">Save branch</button>
+          </form>
+        </div>
+        <div class="card"><p class="eyebrow">TEAM</p><h3>Assigned teachers</h3>
+          ${site.id ? `<form id="assignmentForm"><div id="teacherAssignments" class="teacher-list">Loading assignments...</div><div id="assignmentMessage" class="msg hidden"></div><button style="margin-top:14px">Save assignments</button></form>` : `<p class="mute">Save this branch first, then assign its teachers.</p>`}
+        </div>
+      </div>
+      <div class="card"><p class="eyebrow">TEAM ACCESS</p><h3>Invite a teacher</h3><p class="mute">Send a sign-in invitation. The teacher sets their own password.</p>
+        <form id="createTeacherForm"><div class="row"><div><label>Full name</label><input name="full_name" maxlength="120" required></div><div><label>Email</label><input name="email" type="email" autocomplete="email" required></div></div>
+          <label>Assign branches</label><div class="teacher-list">${branchSites.filter((branch) => branch.active).map((branch) => `<label class="teacher-option"><input type="checkbox" name="invite_site" value="${esc(branch.id)}" ${branch.id === getSelectedSiteId() ? "checked" : ""}><span>${esc(branch.name)}</span></label>`).join("")}</div>
+          <div id="createTeacherMessage" class="msg hidden"></div><button>Send invitation</button>
+        </form>
+      </div>`;
+
+      $("#panel").querySelectorAll("button[data-branch]").forEach((button) => {
+        button.onclick = () => { setSelectedSiteId(button.dataset.branch); localStorage.setItem("attendance-site", button.dataset.branch); tabSettings(); };
+      });
+      $("#newBranch").onclick = () => tabSettings(true);
+      if (site.id) {
+        const { data: assignments, error: assignmentReadError } = await sb.from("site_assignments").select("teacher_id").eq("site_id", site.id);
+        if (assignmentReadError) return ($("#teacherAssignments").innerHTML = `<div class="msg err">${esc(cleanErr(assignmentReadError))}</div>`);
+        const assignedIds = new Set((assignments || []).map((row) => row.teacher_id));
         $("#teacherAssignments").innerHTML = branchTeachers.length
-          ? branchTeachers.map((teacher) => `<label class="teacher-option"><input type="checkbox" name="teacher" value="${esc(teacher.id)}" ${teacher.active ? "" : "disabled"}><span>${esc(teacher.full_name)}</span>${teacher.active ? "" : `<small>Inactive</small>`}</label>`).join("")
-          : `<p class="mute">No teacher accounts found.</p>`;
-        return;
+          ? branchTeachers.map((teacher) => `<label class="teacher-option"><input type="checkbox" name="teacher" value="${esc(teacher.id)}" ${assignedIds.has(teacher.id) ? "checked" : ""} ${teacher.active ? "" : "disabled"}><span>${esc(teacher.full_name)}</span>${teacher.active ? "" : `<small>Inactive</small>`}</label>`).join("")
+          : `<p class="mute">No teacher accounts.</p>`;
+        $("#assignmentForm").onsubmit = async (event) => {
+          event.preventDefault();
+          const teacherIds = [...event.target.querySelectorAll('input[name="teacher"]:checked')].map((checkbox) => checkbox.value);
+          const { error } = await sb.rpc("save_site_assignments", { p_site_id: site.id, p_teacher_ids: teacherIds });
+          if (error) return msg($("#assignmentMessage"), cleanErr(error));
+          msg($("#assignmentMessage"), "Teacher assignments saved.", "good");
+        };
       }
-      const { data, error } = await sb.from("site_assignments").select("teacher_id").eq("site_id", siteId);
-      if (error) return ($("#teacherAssignments").innerHTML = `<div class="msg err">${esc(cleanErr(error))}</div>`);
-      const assigned = new Set((data || []).map((row) => row.teacher_id));
-      $("#teacherAssignments").innerHTML = branchTeachers.length
-        ? branchTeachers.map((teacher) => `<label class="teacher-option"><input type="checkbox" name="teacher" value="${esc(teacher.id)}" ${assigned.has(teacher.id) ? "checked" : ""} ${teacher.active ? "" : "disabled"}><span>${esc(teacher.full_name)}</span>${teacher.active ? "" : `<small>Inactive</small>`}</label>`).join("")
-        : `<p class="mute">No teacher accounts found.</p>`;
-    };
-    await renderAssignments(site.id);
-    $("#branchEdit").onchange = () => {
-      const id = $("#branchEdit").value;
-      if (id) { setSelectedSiteId(id); localStorage.setItem("attendance-site", id); }
-      tabSettings(!id);
-    };
-    $("#newBranch").onclick = () => { $("#branchEdit").value = ""; tabSettings(true); };
-    $("#here").onclick = async () => {
-      try {
-        const position = await getPosition(); $("#sf").lat.value = position.coords.latitude.toFixed(6); $("#sf").lng.value = position.coords.longitude.toFixed(6);
-        msg($("#sm"), `Captured (accuracy about ${Math.round(position.coords.accuracy)} m). Save to apply.`, "good");
-      } catch (error) { msg($("#sm"), cleanErr(error)); }
-    };
-    $("#sf").onsubmit = async (event) => {
-      event.preventDefault(); const form = event.target;
-      const latitude = Number(form.lat.value), longitude = Number(form.lng.value);
-      if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90) return msg($("#sm"), "Latitude must be between -90 and 90.");
-      if (!Number.isFinite(longitude) || longitude < -180 || longitude > 180) return msg($("#sm"), "Longitude must be between -180 and 180.");
-      const patch = { name: form.elements.namedItem("name").value.trim(), active: form.active.checked, institute_lat: latitude, institute_lng: longitude,
-        radius_m: +form.radius.value, max_accuracy_m: +form.acc.value, shift_start: form.start.value, shift_end: form.end.value,
-        late_grace_min: +form.grace.value, working_days: [...form.querySelectorAll('input[name="wd"]:checked')].map((checkbox) => Number(checkbox.value)) };
-      const result = site.id
-        ? await sb.from("institute_sites").update(patch).eq("id", site.id).select().single()
-        : await sb.from("institute_sites").insert(patch).select().single();
-      if (result.error) return msg($("#sm"), cleanErr(result.error));
-      const siteId = result.data.id;
-      const teacherIds = [...form.querySelectorAll('input[name="teacher"]:checked')].map((checkbox) => checkbox.value);
-      const { error: assignmentError } = await sb.rpc("save_site_assignments", { p_site_id: siteId, p_teacher_ids: teacherIds });
-      if (assignmentError) return msg($("#sm"), cleanErr(assignmentError));
-      setSelectedSiteId(siteId); localStorage.setItem("attendance-site", siteId);
-      msg($("#sm"), "Branch and teacher assignments saved.", "good");
-      const { data: refreshedSites } = await sb.from("institute_sites").select("*").eq("active", true).order("name");
-      setSites(refreshedSites || []);
-      if (!getSites().some((branch) => branch.id === getSelectedSiteId())) setSelectedSiteId(getSites()[0]?.id || siteId);
-      localStorage.setItem("attendance-site", getSelectedSiteId());
-      bindSitePicker(() => showTab(activeTab));
-      renderAdmin();
-    };
+      $("#here").onclick = async () => {
+        try {
+          const position = await getPosition(); $("#sf").lat.value = position.coords.latitude.toFixed(6); $("#sf").lng.value = position.coords.longitude.toFixed(6);
+          msg($("#sm"), `Captured (accuracy about ${Math.round(position.coords.accuracy)} m). Save to apply.`, "good");
+        } catch (error) { msg($("#sm"), cleanErr(error)); }
+      };
+      $("#sf").onsubmit = async (event) => {
+        event.preventDefault(); const form = event.target;
+        const latitude = Number(form.lat.value), longitude = Number(form.lng.value);
+        if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90) return msg($("#sm"), "Latitude must be between -90 and 90.");
+        if (!Number.isFinite(longitude) || longitude < -180 || longitude > 180) return msg($("#sm"), "Longitude must be between -180 and 180.");
+        const patch = { name: form.elements.namedItem("name").value.trim(), active: form.active.checked, institute_lat: latitude, institute_lng: longitude,
+          radius_m: Number(form.radius.value), max_accuracy_m: Number(form.acc.value), late_grace_min: Number(form.grace.value),
+          working_days: [...form.querySelectorAll('input[name="wd"]:checked')].map((checkbox) => Number(checkbox.value)) };
+        const result = site.id
+          ? await sb.from("institute_sites").update(patch).eq("id", site.id).select().single()
+          : await sb.from("institute_sites").insert(patch).select().single();
+        if (result.error) return msg($("#sm"), cleanErr(result.error));
+        setSelectedSiteId(result.data.id); localStorage.setItem("attendance-site", result.data.id);
+        const { data: refreshedSites, error: refreshError } = await sb.from("institute_sites").select("*").order("name");
+        if (refreshError) return msg($("#sm"), cleanErr(refreshError));
+        setSites(refreshedSites || []);
+        tabSettings();
+      };
+      $("#createTeacherForm").onsubmit = async (event) => {
+        event.preventDefault();
+        const form = event.target, message = $("#createTeacherMessage");
+        const siteIds = [...form.querySelectorAll('input[name="invite_site"]:checked')].map((checkbox) => checkbox.value);
+        if (!siteIds.length) return msg(message, "Select at least one branch.");
+        const { error } = await sb.functions.invoke("create-teacher", { body: {
+          full_name: form.elements.full_name.value.trim(), email: form.elements.email.value.trim(), site_ids: siteIds
+        } });
+        if (error) return msg(message, cleanErr(error));
+        form.reset(); msg(message, "Invitation sent. The teacher can set a password from their email.", "good");
+      };
   }
 
   return { renderAdmin };

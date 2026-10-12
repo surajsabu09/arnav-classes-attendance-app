@@ -1,4 +1,4 @@
-export function createTeacherViews({ sb, app, $, esc, fmtDate, fmtTime, fmtShort, istDate, pill, msg, cleanErr, getPosition, getMe, pwCard, bindPw }) {
+export function createTeacherViews({ sb, app, $, esc, fmtDate, fmtTime, fmtShort, istDate, pill, msg, cleanErr, getPosition, getMe, getEmail, getSites, accountView, bindPw }) {
   const tabs = [["today", "Today"], ["schedule", "Schedule"], ["history", "History"], ["leave", "Leave"], ["account", "Account"]];
   let activeTab = "today";
 
@@ -25,7 +25,7 @@ export function createTeacherViews({ sb, app, $, esc, fmtDate, fmtTime, fmtShort
     if (key === "schedule") return loadSchedule();
     if (key === "history") return loadHistory();
     if (key === "leave") return loadLeaves();
-    panel.innerHTML = pwCard();
+    panel.innerHTML = accountView({ fullName: getMe().full_name, email: getEmail(), role: getMe().role, branches: getSites().map((site) => site.name) });
     bindPw();
   }
 
@@ -81,6 +81,7 @@ export function createTeacherViews({ sb, app, $, esc, fmtDate, fmtTime, fmtShort
     const panel = $("#teacherPanel");
     panel.innerHTML = `<div class="two-column"><div class="card"><p class="eyebrow">TIME OFF</p><h3>Request leave</h3>
       <form id="lf"><div class="row"><div><label>From</label><input type="date" name="from" required></div><div><label>To</label><input type="date" name="to" required></div></div>
+        <label>Leave type<select name="leave_type" required><option value="casual">Casual</option><option value="sick">Sick</option><option value="personal">Personal</option><option value="unpaid">Unpaid</option><option value="other">Other</option></select></label>
         <label>Reason</label><textarea name="reason" rows="3" maxlength="300" required></textarea>
         <div id="lm" class="msg hidden"></div><button style="margin-top:10px">Submit request</button></form></div>
       <div class="card"><p class="eyebrow">YOUR REQUESTS</p><h3>Leave status</h3><div id="myLeaves" class="scroll">Loading...</div></div></div>`;
@@ -88,7 +89,7 @@ export function createTeacherViews({ sb, app, $, esc, fmtDate, fmtTime, fmtShort
     const { data, error } = await sb.from("leaves").select("*").eq("teacher_id", getMe().id).order("created_at", { ascending: false }).limit(20);
     if (error) return ($("#myLeaves").innerHTML = `<div class="msg err">${esc(cleanErr(error))}</div>`);
     $("#myLeaves").innerHTML = (data || []).length
-      ? `<table><tr><th>Dates</th><th>Status</th></tr>${data.map((leave) => `<tr><td>${fmtDate(leave.from_date)}${leave.to_date !== leave.from_date ? ` - ${fmtDate(leave.to_date)}` : ""}</td><td>${pill(leave.status)}</td></tr>`).join("")}</table>`
+      ? `<table><tr><th>Dates</th><th>Type</th><th>Status</th></tr>${data.map((leave) => `<tr><td>${fmtDate(leave.from_date)}${leave.to_date !== leave.from_date ? ` - ${fmtDate(leave.to_date)}` : ""}</td><td>${esc(leave.leave_type)}</td><td>${pill(leave.status)}</td></tr>`).join("")}</table>`
       : `<p class="mute">No leave requests yet.</p>`;
   }
 
@@ -113,7 +114,7 @@ export function createTeacherViews({ sb, app, $, esc, fmtDate, fmtTime, fmtShort
   async function submitLeave(event) {
     event.preventDefault();
     const formData = new FormData(event.target), message = $("#lm");
-    const { error } = await sb.from("leaves").insert({ teacher_id: getMe().id, from_date: formData.get("from"), to_date: formData.get("to"), reason: formData.get("reason").trim() });
+    const { error } = await sb.from("leaves").insert({ teacher_id: getMe().id, from_date: formData.get("from"), to_date: formData.get("to"), leave_type: formData.get("leave_type"), reason: formData.get("reason").trim() });
     if (error) return msg(message, cleanErr(error));
     event.target.reset(); msg(message, "Leave request sent.", "good"); loadLeaves();
   }

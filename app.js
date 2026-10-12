@@ -18,11 +18,11 @@ import { createTeacherViews } from "./teacher.js";
   const isRecovery = /type=recovery/.test(location.hash);
 
   // ---------- auth ----------
-  const { renderLogin, pwCard, bindPw, renderSetPassword } = createAuthViews({
+  const { renderLogin, bindPw, renderSetPassword, accountView } = createAuthViews({
     sb, app, $, esc, msg, cleanErr, getSessionEmail: () => sessionEmail, boot: () => boot()
   });
   const teacherViews = createTeacherViews({ sb, app, $, esc, fmtDate, fmtTime, fmtShort, istDate, pill, msg, cleanErr, getPosition,
-    getMe: () => me, pwCard, bindPw });
+    getMe: () => me, getEmail: () => sessionEmail, getSites: () => sites, accountView, bindPw });
 
   $("#logout").onclick = async () => { await sb.auth.signOut(); me = null; renderLogin(); };
 
@@ -77,9 +77,9 @@ import { createTeacherViews } from "./teacher.js";
 
   const adminViews = createAdminViews({
     sb, app, $, esc, fmtDate, fmtShort, fmtTime, istDate, isSessionOverdue, pill, msg, cleanErr, getPosition,
-    getMe: () => me, getSites: () => sites, getSelectedSiteId: () => selectedSiteId,
+    getMe: () => me, getEmail: () => sessionEmail, accountView, getSites: () => sites, getSelectedSiteId: () => selectedSiteId,
     setSelectedSiteId: (id) => { selectedSiteId = id; }, setSites: (items) => { sites = items; },
-    sitePicker, bindSitePicker, pwCard, bindPw
+    sitePicker, bindSitePicker, bindPw
   });
 
   // ---------- start ----------

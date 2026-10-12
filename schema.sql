@@ -150,12 +150,21 @@ create table if not exists public.leaves (
   teacher_id uuid not null references public.profiles(id) on delete cascade,
   from_date date not null,
   to_date date not null,
+  leave_type text not null default 'other' check (leave_type in ('casual','sick','personal','unpaid','other')),
   reason text not null default '',
   status text not null default 'pending' check (status in ('pending','approved','rejected')),
   decided_by uuid references public.profiles(id),
   created_at timestamptz not null default now(),
   check (to_date >= from_date)
 );
+
+alter table public.leaves add column if not exists leave_type text not null default 'other';
+do $$
+begin
+  if not exists (select 1 from pg_constraint where conrelid = 'public.leaves'::regclass and conname = 'leaves_leave_type_valid') then
+    alter table public.leaves add constraint leaves_leave_type_valid check (leave_type in ('casual','sick','personal','unpaid','other'));
+  end if;
+end $$;
 
 -- ---------- Helpers ----------
 create or replace function public.is_admin() returns boolean

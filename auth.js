@@ -32,14 +32,20 @@ export function createAuthViews({ sb, app, $, esc, msg, cleanErr, getSessionEmai
   }
 
   function pwCard() {
-    return `<div class="card"><h2>Change password</h2>
-      <form id="pf">
-        <label>Current password</label><input name="cur" type="password" autocomplete="current-password" required>
-        <label>New password (min ${passwordMinimum} characters)</label><input name="p1" type="password" autocomplete="new-password" minlength="${passwordMinimum}" required>
-        <label>Confirm new password</label><input name="p2" type="password" autocomplete="new-password" minlength="${passwordMinimum}" required>
-        <div id="pm" class="msg hidden"></div>
-        <button style="margin-top:12px">Update password</button>
-      </form></div>`;
+    return `<form id="pf">
+      <label>Current password</label><input name="cur" type="password" autocomplete="current-password" required>
+      <label>New password</label><input name="p1" type="password" autocomplete="new-password" minlength="${passwordMinimum}" required>
+      <label>Confirm new password</label><input name="p2" type="password" autocomplete="new-password" minlength="${passwordMinimum}" required>
+      <div id="pm" class="msg hidden"></div>
+      <button style="margin-top:12px">Update password</button>
+    </form>`;
+  }
+
+  function accountView({ fullName, email, role, branches }) {
+    const branchSummary = role === "admin" ? "All branches (administrator)" : branches.length ? branches.map(esc).join(", ") : "No branch assigned";
+    return `<section class="account-view"><div class="card"><p class="eyebrow">ACCOUNT</p><h3>Employee details</h3>
+      <dl class="account-details"><div><dt>Name</dt><dd>${esc(fullName || "")}</dd></div><div><dt>Email</dt><dd>${esc(email || "")}</dd></div><div><dt>Role</dt><dd>${esc(role || "")}</dd></div><div><dt>Branch access</dt><dd>${branchSummary}</dd></div></dl>
+      </div><details class="account-password"><summary>Change password</summary>${pwCard()}</details></section>`;
   }
 
   function bindPw() {
@@ -84,5 +90,5 @@ export function createAuthViews({ sb, app, $, esc, msg, cleanErr, getSessionEmai
     };
   }
 
-  return { renderLogin, pwCard, bindPw, renderSetPassword };
+  return { renderLogin, pwCard, bindPw, renderSetPassword, accountView };
 }
