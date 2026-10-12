@@ -14,13 +14,16 @@ Cost: Rs 0 (Supabase free + any free static host).
 2. **Config**: edit `config.js` with the Project URL and anon key (Project Settings -> API) and the institute name.
 3. **Host** the folder as a static site (HTTPS is required for GPS): Cloudflare Pages, Netlify or GitHub Pages, all free. Drag-and-drop the folder.
 4. **Set up branches**: sign in as admin -> Branches -> edit the migrated "Main institute" or add a branch. Set its coordinates (use "Use my current location" while inside that institute), radius, shift and working days, then assign teachers and save. Repeat for each location. A teacher can be assigned to multiple branches.
-5. **Schedule lectures**: open Schedule -> choose a lecture/batch name, branch, teacher, and date. Add start and end times when fixed; leave both blank when the timing varies. Teachers see their own lectures and check in/out at the assigned branch.
+5. **Schedule lectures**: open Schedule -> choose a lecture/batch name, branch, teacher, and date. The branch shift and grace values prefill the form; change or clear both times for flexible lectures. Overlapping fixed-time lectures for the same teacher are rejected.
 6. Teachers open the site on their phone -> browser menu -> "Add to Home Screen".
 
 ## How it works
+- The frontend is split into small ES modules for authentication, shared utilities, teacher screens, and admin screens. The cache version is maintained in `config.js`.
 - Admins create individual dated lecture sessions. A session may have a fixed time or a flexible time.
-- Check-in/out calls the `mark_attendance()` database function with a lecture ID. The server validates the teacher's lecture assignment, branch geofence, GPS accuracy and lateness; editing the JS does not bypass those checks.
+- Check-in/out calls the `mark_attendance()` database function with a lecture ID. The server validates the teacher's lecture assignment, branch geofence, GPS accuracy and lateness; editing the JS does not bypass those checks. Out-of-geofence check-outs are allowed but flagged, and admins can close open sessions.
 - Each lecture has its own attendance record, so a teacher can teach at multiple branches on the same day. Late status is calculated only for lectures with a scheduled start time.
+- Approved leave is excluded from missed-lecture counts. Open sessions are reported separately and do not add completed hours.
+- Monthly totals are calculated by a SQL function, avoiding the browser API's 1,000-row response limit. Branch-assignment replacement is transactional.
 - Teacher screens: Today, Schedule, History, Leave, Account. Admin screens: Today, Schedule, Leaves, Report, Branches, Account. Monthly reports consolidate lecture counts and worked hours by teacher, across branches or for one branch.
 
 ## Passwords
@@ -38,7 +41,7 @@ Cost: Rs 0 (Supabase free + any free static host).
   Tell the teacher the temporary password and ask them to change it after signing in. (If Supabase says the function `extensions.crypt` does not exist, remove the `extensions.` prefix from both function names.) Do not delete and recreate a user to reset a password: that also deletes their attendance history.
 
 ## Known limits (be upfront with the client)
-- **GPS can be spoofed** with mock-location apps. This stops casual proxy attendance (marking from home), not a determined cheater. If that matters, add a daily rotating QR code later.
+- **GPS can be spoofed** with mock-location apps. Geofencing discourages casual proxy attendance but does not stop a determined user; consider a rotating QR code if stronger verification is needed.
 - **Alerts are in the dashboard only.** There are no push, SMS or email alerts, since those need paid services or extra setup. Admins can review lecture attendance on the Today tab.
 - Supabase free projects **pause after ~1 week of no activity**. Daily use prevents this.
 - Free tier has no automatic backups. Export the monthly CSVs, or use Table Editor -> Export occasionally.

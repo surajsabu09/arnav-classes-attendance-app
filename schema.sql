@@ -41,6 +41,16 @@ create table if not exists public.institute_sites (
   created_at timestamptz not null default now()
 );
 
+do $$
+begin
+  if not exists (select 1 from pg_constraint where conrelid = 'public.institute_sites'::regclass and conname = 'institute_sites_latitude_range') then
+    alter table public.institute_sites add constraint institute_sites_latitude_range check (institute_lat between -90 and 90);
+  end if;
+  if not exists (select 1 from pg_constraint where conrelid = 'public.institute_sites'::regclass and conname = 'institute_sites_longitude_range') then
+    alter table public.institute_sites add constraint institute_sites_longitude_range check (institute_lng between -180 and 180);
+  end if;
+end $$;
+
 -- Preserve the existing single institute as the first branch.
 insert into public.institute_sites (name, institute_lat, institute_lng, radius_m, max_accuracy_m,
                                     shift_start, shift_end, late_grace_min, working_days)
@@ -69,6 +79,26 @@ create table if not exists public.lecture_sessions (
   check ((start_time is null and end_time is null) or (start_time is not null and end_time > start_time))
 );
 
+create or replace function public.prevent_teacher_lecture_overlap() returns trigger
+language plpgsql set search_path = public as $$
+begin
+  if new.active and new.start_time is not null then
+    perform pg_advisory_xact_lock(hashtext(new.teacher_id::text)::bigint);
+    if exists (
+      select 1 from public.lecture_sessions existing
+      where existing.teacher_id = new.teacher_id and existing.session_date = new.session_date
+        and existing.active and existing.start_time is not null and existing.id <> new.id
+        and existing.start_time < new.end_time and existing.end_time > new.start_time
+    ) then
+      raise exception 'This teacher already has a lecture during that time.';
+    end if;
+  end if;
+  return new;
+end $$;
+drop trigger if exists prevent_teacher_lecture_overlap on public.lecture_sessions;
+create trigger prevent_teacher_lecture_overlap before insert or update of teacher_id, site_id, session_date, start_time, end_time, active
+  on public.lecture_sessions for each row execute function public.prevent_teacher_lecture_overlap();
+
 -- Existing teachers keep access to the initial branch after upgrading.
 insert into public.site_assignments (site_id, teacher_id)
 select (select id from public.institute_sites order by created_at limit 1), p.id
@@ -86,10 +116,14 @@ create table if not exists public.attendance (
   check_in_dist_m int,
   check_out timestamptz,
   check_out_dist_m int,
+  check_out_outside_geofence boolean not null default false,
+  check_out_admin boolean not null default false,
   is_late boolean not null default false
 );
 
 alter table public.attendance add column if not exists session_id uuid references public.lecture_sessions(id);
+alter table public.attendance add column if not exists check_out_outside_geofence boolean not null default false;
+alter table public.attendance add column if not exists check_out_admin boolean not null default false;
 do $$
 declare
   daily_unique record;
@@ -128,6 +162,23 @@ create or replace function public.is_admin() returns boolean
 language sql stable security definer set search_path = public as $$
   select exists (select 1 from profiles where id = auth.uid() and role = 'admin' and active);
 $$;
+
+create or replace function public.save_site_assignments(p_site_id uuid, p_teacher_ids uuid[])
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if not is_admin() then raise exception 'Admins only'; end if;
+  if not exists (select 1 from public.institute_sites where id = p_site_id) then raise exception 'Branch not found'; end if;
+  if exists (
+    select 1 from unnest(coalesce(p_teacher_ids, '{}'::uuid[])) selected(teacher_id)
+    left join public.profiles p on p.id = selected.teacher_id and p.role = 'teacher' and p.active
+    where p.id is null
+  ) then raise exception 'A selected teacher account is unavailable'; end if;
+  delete from public.site_assignments
+  where site_id = p_site_id and not (teacher_id = any(coalesce(p_teacher_ids, '{}'::uuid[])));
+  insert into public.site_assignments (site_id, teacher_id)
+  select p_site_id, selected.teacher_id from unnest(coalesce(p_teacher_ids, '{}'::uuid[])) selected(teacher_id)
+  on conflict do nothing;
+end $$;
 
 -- Auto-create a profile whenever a user is added in Supabase Auth.
 create or replace function public.handle_new_user() returns trigger
@@ -169,27 +220,36 @@ declare
 begin
   select * into me from profiles where id = auth.uid() and active;
   if not found then raise exception 'Account not active'; end if;
+  if p_action not in ('in', 'out') then raise exception 'Invalid action'; end if;
   select * into meeting from lecture_sessions where id = p_session_id and (active or p_action = 'out');
   if not found then raise exception 'This lecture is unavailable.'; end if;
   if me.role <> 'admin' and meeting.teacher_id <> me.id then raise exception 'This lecture is not assigned to you.'; end if;
-  if me.role <> 'admin' and not exists (
+  if p_action = 'in' and me.role <> 'admin' and not exists (
     select 1 from site_assignments where site_id = meeting.site_id and teacher_id = me.id
   ) then raise exception 'You are not assigned to this institute branch.'; end if;
-  if meeting.session_date <> today then raise exception 'Attendance can only be marked on the lecture date.'; end if;
+  if p_action = 'in' and meeting.session_date <> today then raise exception 'Check-in is only available on the lecture date.'; end if;
   select * into s from institute_sites where id = meeting.site_id and (active or p_action = 'out');
   if not found then raise exception 'Institute branch is unavailable.'; end if;
 
   if s.institute_lat = 0 and s.institute_lng = 0 then
     raise exception 'This branch location is not configured yet. Ask the admin.';
   end if;
-  if p_lat is null or p_lng is null then raise exception 'Location missing'; end if;
-  if p_accuracy is null or p_accuracy > s.max_accuracy_m then
-    raise exception 'GPS accuracy too low (% m). Move near a window or enable precise location.', round(coalesce(p_accuracy,-1));
+  if (p_lat is null) <> (p_lng is null) then raise exception 'Incomplete location'; end if;
+  if p_lat is not null and (p_lat < -90 or p_lat > 90 or p_lng < -180 or p_lng > 180) then
+    raise exception 'Invalid location coordinates';
   end if;
+  if p_lat is not null then d := round(dist_m(p_lat, p_lng, s.institute_lat, s.institute_lng)); end if;
 
-  d := round(dist_m(p_lat, p_lng, s.institute_lat, s.institute_lng));
-  if d > s.radius_m then
-    raise exception 'You are % m from the institute (limit % m).', d, s.radius_m;
+  if p_action = 'in' then
+    if d is null then raise exception 'Location missing'; end if;
+    if p_accuracy is null or p_accuracy > s.max_accuracy_m then
+      raise exception 'GPS accuracy too low (% m). Move near a window or enable precise location.', round(coalesce(p_accuracy,-1));
+    end if;
+    if d > s.radius_m then
+      raise exception 'You are % m from the institute (limit % m).', d, s.radius_m;
+    end if;
+  elsif p_action = 'out' and me.role <> 'admin' and (d is null or p_accuracy is null) then
+    raise exception 'Location missing';
   end if;
 
   if p_action = 'in' then
@@ -199,13 +259,13 @@ begin
     on conflict do nothing
     returning * into rec;
     if not found then raise exception 'Attendance is already recorded for this lecture.'; end if;
-  elsif p_action = 'out' then
-    update attendance set check_out = now(), check_out_dist_m = d
-    where session_id = meeting.id and teacher_id = me.id and check_in is not null and check_out is null
+  else
+    update attendance set check_out = now(), check_out_dist_m = d,
+      check_out_outside_geofence = d is null or d > s.radius_m or coalesce(p_accuracy > s.max_accuracy_m, true),
+      check_out_admin = me.role = 'admin'
+    where session_id = meeting.id and teacher_id = meeting.teacher_id and check_in is not null and check_out is null
     returning * into rec;
     if not found then raise exception 'No open check-in for today.'; end if;
-  else
-    raise exception 'Invalid action';
   end if;
 
   return row_to_json(rec);
@@ -215,6 +275,48 @@ drop function if exists public.admin_day_status(date);
 drop function if exists public.admin_day_status(date, uuid);
 drop function if exists public.admin_monthly_report(int, int);
 drop function if exists public.admin_monthly_report(int, int, uuid);
+
+create or replace function public.admin_monthly_report(p_year int, p_month int, p_site_id uuid default null)
+returns table (teacher_id uuid, full_name text, lectures int, attended int, late int, missed int,
+               open_sessions int, leave_days int, hours_worked numeric)
+language plpgsql stable security definer set search_path = public as $$
+declare
+  month_start date;
+  month_end date;
+  report_today date := (now() at time zone 'Asia/Kolkata')::date;
+  now_ist timestamp := now() at time zone 'Asia/Kolkata';
+begin
+  if not is_admin() then raise exception 'Admins only'; end if;
+  if p_month < 1 or p_month > 12 then raise exception 'Invalid report month'; end if;
+  month_start := make_date(p_year, p_month, 1);
+  month_end := (month_start + interval '1 month')::date;
+
+  return query
+  with session_rows as (
+    select ls.teacher_id, p.full_name, ls.session_date, ls.start_time, ls.late_grace_min,
+      a.check_in, a.check_out, a.is_late,
+      exists (select 1 from public.leaves l where l.teacher_id = ls.teacher_id and l.status = 'approved'
+              and ls.session_date between l.from_date and l.to_date) as on_leave
+    from public.lecture_sessions ls
+    join public.profiles p on p.id = ls.teacher_id
+    left join public.attendance a on a.session_id = ls.id
+    where ls.active and ls.session_date >= month_start and ls.session_date < month_end
+      and ls.session_date <= report_today and (p_site_id is null or ls.site_id = p_site_id)
+  )
+  select sr.teacher_id, sr.full_name, count(*)::int,
+    count(*) filter (where sr.check_in is not null)::int,
+    count(*) filter (where sr.is_late)::int,
+    count(*) filter (where sr.check_in is null and not sr.on_leave and
+      (sr.session_date < report_today or (sr.session_date = report_today and sr.start_time is not null and
+       now_ist::time > sr.start_time + make_interval(mins => sr.late_grace_min))))::int,
+    count(*) filter (where sr.check_in is not null and sr.check_out is null)::int,
+    count(distinct sr.session_date) filter (where sr.on_leave)::int,
+    round(coalesce(sum(extract(epoch from (sr.check_out - sr.check_in)) / 3600.0)
+      filter (where sr.check_in is not null and sr.check_out is not null), 0)::numeric, 1)
+  from session_rows sr
+  group by sr.teacher_id, sr.full_name
+  order by sr.full_name;
+end $$;
 
 -- ---------- Row Level Security ----------
 alter table profiles   enable row level security;
@@ -277,6 +379,10 @@ create policy "teacher applies"    on leaves for insert with check (teacher_id =
 create policy "admin decides"      on leaves for update using (is_admin());
 
 grant execute on function public.mark_attendance(text, uuid, double precision, double precision, double precision) to authenticated;
+revoke all on function public.save_site_assignments(uuid, uuid[]) from public;
+grant execute on function public.save_site_assignments(uuid, uuid[]) to authenticated;
+revoke all on function public.admin_monthly_report(int, int, uuid) from public;
+grant execute on function public.admin_monthly_report(int, int, uuid) to authenticated;
 
 -- ---------- After creating your own account in Auth -> Users, make yourself admin: ----------
 -- update public.profiles set role = 'admin' where id = (select id from auth.users where email = 'ADMIN_EMAIL_HERE');

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#1f4fd8">
+<meta name="theme-color" content="#176b58">
 <title>Teacher Attendance</title>
 <link rel="manifest" href="manifest.json">
 <link rel="icon" href="icon-192.png">
@@ -50,7 +50,7 @@
   tr:last-child td{border-bottom:0}
   .scroll{overflow-x:auto}.nw{white-space:nowrap}a{color:var(--brand)}
   .pill{display:inline-block;padding:3px 10px;border-radius:99px;font-size:11px;font-weight:700;background:var(--neutralbg);white-space:nowrap}
-  .pill.present,.pill.approved{background:var(--okbg);color:var(--ok)}.pill.late,.pill.pending{background:var(--warnbg);color:var(--warn)}.pill.absent,.pill.rejected{background:var(--badbg);color:var(--bad)}
+  .pill.present,.pill.approved,.pill.complete,.pill.closed_by_admin{background:var(--okbg);color:var(--ok)}.pill.late,.pill.pending,.pill.scheduled,.pill.open,.pill.open_late{background:var(--warnbg);color:var(--warn)}.pill.absent,.pill.rejected,.pill.out_of_range{background:var(--badbg);color:var(--bad)}.pill.on_leave{background:var(--neutralbg);color:var(--ink)}
   .msg{padding:11px 13px;border-radius:6px;margin:12px 0;font-size:14px}.msg.err{background:var(--badbg);color:var(--bad)}.msg.good{background:var(--okbg);color:var(--ok)}
   .mute{color:var(--mute);font-size:14px}.hidden{display:none!important}
   .attendance-card{max-width:740px;padding:26px}.attendance-top,.section-heading,.assignment-heading{display:flex;align-items:center;justify-content:space-between;gap:16px}
@@ -67,7 +67,7 @@
   .session-list{display:grid;gap:10px}.session-card{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:16px 18px;background:var(--paper);border:1px solid var(--line);border-radius:8px}.session-info{min-width:0}.session-info .eyebrow{margin-bottom:4px}.session-info h4{font:700 16px/1.35 "Manrope",sans-serif;color:var(--ink)}.session-info p{margin:5px 0 0}.session-times{font-size:13px;color:var(--ink)}.session-times span{margin-left:14px}.session-action{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;min-width:145px}.session-action .msg{flex-basis:100%;margin:0}.schedule-layout{align-items:start}.schedule-layout .card{min-width:0}.schedule-layout .row{align-items:flex-end}.schedule-layout .session-card{align-items:flex-start;padding:12px}.schedule-layout .session-action{min-width:0}
   @media(max-width:680px){.session-card{align-items:flex-start;flex-direction:column}.session-action{justify-content:flex-start;width:100%}.schedule-layout .session-card{flex-direction:column}}
   @media(max-width:680px){main{padding:24px 16px 48px}.page-heading{align-items:stretch;flex-direction:column;gap:16px}.site-control{width:100%}.two-column{grid-template-columns:1fr}.attendance-card{padding:20px}}
-  @media(max-width:600px){main .row{display:grid;grid-template-columns:minmax(0,1fr);align-items:stretch;gap:8px}main .row>*,main .row>div,main .row label,main .card label{width:100%;min-width:0;max-width:100%}main .card input[type="date"],main .card input[type="time"],main .card input[type="month"]{display:block;box-sizing:border-box;width:100%;min-width:0;max-width:100%}}
+  @media(max-width:680px){main .card,main .two-column,main .schedule-layout,main .row,main .row>div,main .row label,main .card label{min-width:0;max-width:100%}main .row{display:grid;grid-template-columns:minmax(0,1fr);align-items:stretch;gap:8px}main .row>*,main .row>div,main .row label,main .card label{width:100%;min-width:0;max-width:100%}main .card input[type="date"],main .card input[type="time"],main .card input[type="month"]{display:block;box-sizing:border-box;width:100%;min-width:0;max-width:100%}}
   @media(max-width:480px){header{padding:12px 15px}header #who{display:none}main{padding:20px 12px 40px}.card{padding:17px}.page-heading h2{font-size:24px}.tabs{width:100%}.tabs button{padding:10px 13px;font-size:13px}.row{gap:8px}.time-grid strong{font-size:18px}table{font-size:13px}th,td{padding:9px 7px}th{font-size:10px}}
 </style>
 </head>
@@ -80,6 +80,11 @@
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="config.js"></script>
-<script src="app.js?v=6"></script>
+<script>
+  const appScript = document.createElement("script");
+  appScript.type = "module";
+  appScript.src = `app.js?v=${encodeURIComponent(window.APP_CONFIG.ASSET_VERSION)}`;
+  document.body.appendChild(appScript);
+</script>
 </body>
 </html>
