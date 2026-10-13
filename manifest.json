@@ -1,6 +1,6 @@
 {
-  "name": "Teacher Attendance",
-  "short_name": "Attendance",
+  "name": "Welcome",
+  "short_name": "Welcome to Arunav Classes",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
